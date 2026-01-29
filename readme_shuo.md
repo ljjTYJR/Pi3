@@ -1,0 +1,1 @@
+python process_all.py --base_dir /media/shuo/T7/robolab/scripts/processed_clips/11_08/ --interval 2
