@@ -6,6 +6,10 @@ Processes all subdirectories containing cam01 and cam02 folders.
 
 import subprocess
 import argparse
+import time
+import json
+import re
+import sys
 from pathlib import Path
 
 
@@ -75,14 +79,33 @@ def process_scene(scene_path, cam_paths, interval=2, ckpt=None, device='cuda'):
     print(f"Output: {output_dir}")
     print(f"{'='*80}")
 
-    # Run the command
+    # Run the command and capture output
     try:
-        subprocess.run(cmd, check=True)
+        t_scene_start = time.time()
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        t_scene_end = time.time()
+        subprocess_time = t_scene_end - t_scene_start
+
+        # Print captured output
+        print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+
+        # Extract timing JSON from subprocess output
+        timing_data = None
+        match = re.search(r'===TIMING_JSON_START===\n(.*?)\n===TIMING_JSON_END===',
+                          result.stdout, re.DOTALL)
+        if match:
+            try:
+                timing_data = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                print(f"Warning: Failed to parse timing data for {scene_path.name}")
+
         print(f"✓ Successfully processed {scene_path.name}")
-        return True
+        return True, timing_data, subprocess_time
     except subprocess.CalledProcessError as e:
         print(f"✗ Failed to process {scene_path.name}: {e}")
-        return False
+        return False, None, 0
 
 
 def main():
@@ -124,9 +147,12 @@ def main():
 
     success_count = 0
     failed_scenes = []
+    all_timing_data = []
 
-    for scene_path, cam_paths in scenes:
-        success = process_scene(
+    for idx, (scene_path, cam_paths) in enumerate(scenes, 1):
+        print(f"\n[{idx}/{len(scenes)}] Processing {scene_path.name}...")
+
+        success, timing_data, subprocess_time = process_scene(
             scene_path,
             cam_paths,
             interval=args.interval,
@@ -136,6 +162,10 @@ def main():
 
         if success:
             success_count += 1
+            if timing_data:
+                timing_data['scene_name'] = scene_path.name
+                timing_data['subprocess_time'] = subprocess_time
+                all_timing_data.append(timing_data)
         else:
             failed_scenes.append(scene_path.name)
 
@@ -151,6 +181,58 @@ def main():
         print("\nFailed scenes:")
         for scene_name in failed_scenes:
             print(f"  - {scene_name}")
+
+    # Timing Summary
+    if all_timing_data:
+        print(f"\n{'='*80}")
+        print("TIMING SUMMARY")
+        print(f"{'='*80}")
+
+        # Per-scene breakdown
+        print("\nPer-Scene Breakdown:")
+        print(f"{'Scene':<30} {'Frames':>8} {'Model':>8} {'Load':>8} {'Infer':>8} {'Save':>8} "
+              f"{'Total':>8} {'FPS':>8}")
+        print("-" * 104)
+
+        for td in all_timing_data:
+            timings = td['timings']
+            print(f"{td['scene_name']:<30} "
+                  f"{td['total_frames']:>8} "
+                  f"{timings['model_loading']:>7.2f}s "
+                  f"{timings['data_loading']:>7.2f}s "
+                  f"{timings['inference']:>7.2f}s "
+                  f"{timings['saving']:>7.2f}s "
+                  f"{timings['total']:>7.2f}s "
+                  f"{td['fps']:>7.1f}")
+
+        # Aggregate statistics
+        total_frames = sum(td['total_frames'] for td in all_timing_data)
+        total_model_time = sum(td['timings']['model_loading'] for td in all_timing_data)
+        total_data_time = sum(td['timings']['data_loading'] for td in all_timing_data)
+        total_infer_time = sum(td['timings']['inference'] for td in all_timing_data)
+        total_save_time = sum(td['timings']['saving'] for td in all_timing_data)
+        total_proc_time = sum(td['timings']['total'] for td in all_timing_data)
+        avg_fps = sum(td['fps'] for td in all_timing_data) / len(all_timing_data)
+
+        print("-" * 104)
+        print(f"{'TOTAL':<30} "
+              f"{total_frames:>8} "
+              f"{total_model_time:>7.2f}s "
+              f"{total_data_time:>7.2f}s "
+              f"{total_infer_time:>7.2f}s "
+              f"{total_save_time:>7.2f}s "
+              f"{total_proc_time:>7.2f}s "
+              f"{avg_fps:>7.1f}")
+
+        print(f"\nOverall Statistics:")
+        print(f"  Average processing time per scene: {total_proc_time / len(all_timing_data):.2f}s")
+        print(f"  Average frames per scene: {total_frames / len(all_timing_data):.1f}")
+        print(f"  Total throughput: {total_frames / total_infer_time:.2f} frames/sec")
+        print(f"  Time breakdown:")
+        print(f"    - Model loading: {total_model_time / total_proc_time * 100:.1f}%")
+        print(f"    - Data loading: {total_data_time / total_proc_time * 100:.1f}%")
+        print(f"    - Inference: {total_infer_time / total_proc_time * 100:.1f}%")
+        print(f"    - Saving: {total_save_time / total_proc_time * 100:.1f}%")
 
     print(f"{'='*80}")
 

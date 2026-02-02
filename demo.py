@@ -1,6 +1,8 @@
 import torch
 import argparse
 import numpy as np
+import time
+import json
 from pathlib import Path
 from scipy.spatial.transform import Rotation
 from pi3.utils.basic import load_images_as_tensor
@@ -33,8 +35,13 @@ if __name__ == '__main__':
     # from pi3.utils.debug import setup_debug
     # setup_debug()
 
+    # Initialize timing tracking
+    timings = {}
+    t_total_start = time.time()
+
     # 1. Prepare model
     print(f"Loading model...")
+    t0 = time.time()
     device = torch.device(args.device)
     if args.ckpt is not None:
         model = Pi3().to(device).eval()
@@ -49,11 +56,16 @@ if __name__ == '__main__':
         model = Pi3.from_pretrained("yyfz233/Pi3").to(device).eval()
         # or download checkpoints from `https://huggingface.co/yyfz233/Pi3/resolve/main/model.safetensors`, and `--ckpt ckpts/model.safetensors`
 
+    t1 = time.time()
+    timings['model_loading'] = t1 - t0
+    print(f"[Time] Model loading: {timings['model_loading']:.3f}s")
+
     # 2. Prepare input data - load all data paths and concatenate
     print(f"\n{'='*60}")
     print(f"Loading {len(args.data_path)} data path(s)...")
     print(f"{'='*60}")
 
+    t0 = time.time()
     all_imgs = []
     frame_counts = []  # Track number of frames per data path
     frame_intervals = []  # Track interval used for each data path
@@ -86,19 +98,34 @@ if __name__ == '__main__':
     imgs = torch.cat(all_imgs, dim=0).to(device) # (Total_N, 3, H, W)
     print(f"\nTotal frames: {imgs.shape[0]}")
 
+    t1 = time.time()
+    timings['data_loading'] = t1 - t0
+    print(f"[Time] Data loading: {timings['data_loading']:.3f}s")
+
     # 3. Infer
     print("Running model inference...")
+    t0 = time.time()
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     with torch.no_grad():
         with torch.amp.autocast('cuda', dtype=dtype):
             res = model(imgs[None]) # Add batch dimension
 
+    t1 = time.time()
+    timings['inference'] = t1 - t0
+    print(f"[Time] Inference: {timings['inference']:.3f}s")
+
     # 4. process mask
+    t0 = time.time()
     masks = torch.sigmoid(res['conf'][..., 0]) > 0.1
     non_edge = ~depth_edge(res['local_points'][..., 2], rtol=0.03)
     masks = torch.logical_and(masks, non_edge)[0]
 
+    t1 = time.time()
+    timings['post_processing'] = t1 - t0
+    print(f"[Time] Post-processing: {timings['post_processing']:.3f}s")
+
     # 5. Save camera poses if requested
+    t0 = time.time()
     if args.save_poses is not None:
         camera_poses = res['camera_poses'][0].cpu().numpy()  # Shape: (N, 4, 4)
 
@@ -196,7 +223,31 @@ if __name__ == '__main__':
             print(f"  Output directory: {depth_base_dir}")
             print(f"  Format: .npy files (H, W) in float32")
 
+    t1 = time.time()
+    timings['saving'] = t1 - t0
+    print(f"[Time] Saving: {timings['saving']:.3f}s")
+
+    # Calculate total time and FPS
+    t_total_end = time.time()
+    timings['total'] = t_total_end - t_total_start
+    fps = imgs.shape[0] / timings['inference'] if timings['inference'] > 0 else 0
+
+    # Prepare timing summary
+    timing_summary = {
+        'total_frames': int(imgs.shape[0]),
+        'cameras': camera_names,
+        'timings': timings,
+        'fps': fps
+    }
+
+    # Print structured timing data for process_all.py to parse
+    print(f"\n===TIMING_JSON_START===")
+    print(json.dumps(timing_summary, indent=2))
+    print(f"===TIMING_JSON_END===")
+
     print(f"\n{'='*60}")
     print(f"Done! Processed {len(args.data_path)} data path(s) with {imgs.shape[0]} total frames.")
     print(f"Point cloud shape: {res['points'][0][masks].shape}")
+    print(f"[Time] Total processing time: {timings['total']:.3f}s")
+    print(f"[Time] Throughput: {fps:.2f} frames/sec")
     print(f"{'='*60}")
