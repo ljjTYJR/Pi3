@@ -341,62 +341,61 @@ class BaseTrainer:
             if it >= self.iters_per_epoch:
                 break
 
-            for _ in range(self.cfg.train.gradient_accumulation_steps):
-                with self.accelerator.accumulate(self.model):
-                    # Perform the forward using the accerlate
-                    batch = move_to_device(batch, device=self.accelerator.device)
-                    with self.accelerator.autocast():
-                        forward_output = self.forward_batch(batch, mode='train')
-                    batch_output = self.calculate_loss(forward_output, batch, mode='train')
-                    loss = batch_output.loss
-                    if loss > self.cfg.train.clip_loss:
-                        loss = loss * 0.0
+            with self.accelerator.accumulate(self.model):
+                # Perform the forward using the accerlate
+                batch = move_to_device(batch, device=self.accelerator.device)
+                with self.accelerator.autocast():
+                    forward_output = self.forward_batch(batch, mode='train')
+                batch_output = self.calculate_loss(forward_output, batch, mode='train')
+                loss = batch_output.loss
+                if loss > self.cfg.train.clip_loss:
+                    loss = loss * 0.0
 
-                    # Check if the loss is nan
-                    loss_value = loss.item()
-                    if not math.isfinite(loss_value):
-                        rank = get_rank()
-                        print(
-                            f"Rank {rank}: Loss is {loss_value}, stopping training at iter {it} (epoch {epoch}, global step {self.global_step}).",
-                            force=True,
-                        )
-                        sys.exit(1)
+                # Check if the loss is nan
+                loss_value = loss.item()
+                if not math.isfinite(loss_value):
+                    rank = get_rank()
+                    print(
+                        f"Rank {rank}: Loss is {loss_value}, stopping training at iter {it} (epoch {epoch}, global step {self.global_step}).",
+                        force=True,
+                    )
+                    sys.exit(1)
 
-                    self.accelerator.backward(loss)
+                self.accelerator.backward(loss)
 
-                    for item in batch_output:
-                        if 'loss' in item:
-                            batch_output[item] = self.accelerator.gather(batch_output[item]).mean().item()
-                            if item in loss_details_dict:
-                                loss_details_dict[item] += batch_output[item] / self.cfg.train.gradient_accumulation_steps if loss_value != 0 else 0.0
-                            else:
-                                loss_details_dict[item] = batch_output[item] / self.cfg.train.gradient_accumulation_steps if loss_value != 0 else 0.0
+                for item in batch_output:
+                    if 'loss' in item:
+                        batch_output[item] = self.accelerator.gather(batch_output[item]).mean().item()
+                        if item in loss_details_dict:
+                            loss_details_dict[item] += batch_output[item] / self.cfg.train.gradient_accumulation_steps if loss_value != 0 else 0.0
+                        else:
+                            loss_details_dict[item] = batch_output[item] / self.cfg.train.gradient_accumulation_steps if loss_value != 0 else 0.0
 
-                    # clip the gradient
-                    if self.accelerator.sync_gradients:
-                        params_to_clip = self.model.parameters()
-                        self.accelerator.clip_grad_norm_(
-                            params_to_clip, self.cfg.train.clip_grad
-                        )
-
-                        def get_gradient_norm(parameters):
-                            norm = 0
-                            for param in parameters:
-                                if param.grad is None:
-                                    continue
-                                local_norm = param.grad.detach().data.norm(2)
-                                norm += local_norm.item() ** 2
-                            norm = norm**0.5
-                            return norm
-
-                        grad_norm = get_gradient_norm(self.model.parameters())
-
-                    if self.accelerator.state.deepspeed_plugin is None:
-                        self.optimizer.step()
-                        self.optimizer.zero_grad()
-                    self.lr_scheduler.step()
-
+                # clip the gradient
                 if self.accelerator.sync_gradients:
+                    params_to_clip = self.model.parameters()
+                    self.accelerator.clip_grad_norm_(
+                        params_to_clip, self.cfg.train.clip_grad
+                    )
+
+                    def get_gradient_norm(parameters):
+                        norm = 0
+                        for param in parameters:
+                            if param.grad is None:
+                                continue
+                            local_norm = param.grad.detach().data.norm(2)
+                            norm += local_norm.item() ** 2
+                        norm = norm**0.5
+                        return norm
+
+                    grad_norm = get_gradient_norm(self.model.parameters())
+
+                if self.accelerator.state.deepspeed_plugin is None:
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+                self.lr_scheduler.step()
+
+            if self.accelerator.sync_gradients:
                     start_steps += 1
 
                     # Report to tensorboard
@@ -599,7 +598,16 @@ class BaseTrainer:
                 # os.path.join(self.cfg.log.ckpt_dir, path)
                 path
             )
-            start_epoch = int(path.split("checkpoint_")[-1])
+            # Extract epoch number from checkpoint path
+            # Handles both "checkpoint_N" and "best_model" formats
+            if "checkpoint_" in path:
+                # Extract epoch from "checkpoint_N" format
+                checkpoint_name = path.rstrip('/').split('/')[-1]
+                start_epoch = int(checkpoint_name.split("checkpoint_")[-1])
+            else:
+                # For "best_model" or other formats, start from epoch 0
+                # This is correct for stage transitions where we want to reset the epoch counter
+                start_epoch = 0
 
         return start_epoch
 
