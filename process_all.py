@@ -113,7 +113,7 @@ def main():
 
     parser.add_argument("--base_dir", type=str, required=True,
                         help="Base directory containing scene subdirectories")
-    parser.add_argument("--interval", type=int, default=2,
+    parser.add_argument("--interval", type=int, default=1,
                         help="Frame sampling interval. Default: 2")
     parser.add_argument("--ckpt", type=str, default=None,
                         help="Path to model checkpoint file. Default: None (use pretrained)")
